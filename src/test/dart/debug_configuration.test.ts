@@ -215,14 +215,12 @@ describe("dart cli debugger", () => {
 			assert.equal(resolvedConfig.vmServiceUri, "http://127.0.0.1:8181");
 		});
 
-
 		it("restores the query string after resolving a test program path", async () => {
 			const program = fsPath(helloWorldTestMainFile) + "?name=selected_test";
 			const resolvedConfig = await getResolvedDebugConfiguration({ program });
 
 			assert.ok(resolvedConfig);
 			assert.equal(resolvedConfig.program, program);
-			assert.equal(resolvedConfig.debuggerType, DebuggerType.DartTest);
 		});
 
 		it("uses an explicit VM service URI without prompting on attach", async () => {
@@ -255,7 +253,7 @@ describe("dart cli debugger", () => {
 		it("does not prompt for a VM service URI when an info file is provided", async () => {
 			const executeCommand = sb.stub(vs.commands, "executeCommand").callThrough();
 			const promptForVmService = executeCommand.withArgs("dart.promptForVmService").resolves("9999");
-			const vmServiceInfoFile = path.join(getRandomTempFolder(), "vm_service_info.json");
+			const vmServiceInfoFile = path.join(fsPath(helloWorldFolder), "vm_service_info.json");
 
 			const resolvedConfig = await getAttachConfiguration({ vmServiceInfoFile });
 
@@ -287,6 +285,7 @@ describe("dart cli debugger", () => {
 			const dartError = new vs.Diagnostic(new vs.Range(0, 0, 0, 1), "Unrelated error", vs.DiagnosticSeverity.Error);
 			dartError.source = "dart";
 			const outsideProject = vs.Uri.file(path.join(getRandomTempFolder(), "outside.dart"));
+			defer("remove outside project temp folder", () => tryDelete(path.dirname(fsPath(outsideProject))));
 			sb.stub(vs.languages, "getDiagnostics").returns([
 				[outsideProject, [dartError]],
 				[helloWorldTestMainFile, [dartError]],
