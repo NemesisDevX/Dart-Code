@@ -215,6 +215,123 @@ describe("dart cli debugger", () => {
 			assert.equal(resolvedConfig.vmServiceUri, "http://127.0.0.1:8181");
 		});
 
+
+		it("restores the query string after resolving a test program path", async () => {
+			const program = fsPath(helloWorldTestMainFile) + "?name=selected_test";
+			const resolvedConfig = await getResolvedDebugConfiguration({ program });
+
+			assert.ok(resolvedConfig);
+			assert.equal(resolvedConfig.program, program);
+			assert.equal(resolvedConfig.debuggerType, DebuggerType.DartTest);
+		});
+
+		it("uses an explicit VM service URI without prompting on attach", async () => {
+			const executeCommand = sb.stub(vs.commands, "executeCommand").callThrough();
+			const promptForVmService = executeCommand.withArgs("dart.promptForVmService").resolves("9999");
+
+			const resolvedConfig = await getAttachConfiguration({
+				vmServiceUri: "  http://127.0.0.1:8181/abc/  ",
+			});
+
+			assert.ok(resolvedConfig);
+			assert.equal(resolvedConfig.vmServiceUri, "http://127.0.0.1:8181/abc/");
+			assert.ok(promptForVmService.notCalled);
+		});
+
+		it("falls back to observatoryUri when vmServiceUri is empty on attach", async () => {
+			const executeCommand = sb.stub(vs.commands, "executeCommand").callThrough();
+			const promptForVmService = executeCommand.withArgs("dart.promptForVmService").resolves("9999");
+
+			const resolvedConfig = await getAttachConfiguration({
+				vmServiceUri: "",
+				observatoryUri: "  8182  ",
+			});
+
+			assert.ok(resolvedConfig);
+			assert.equal(resolvedConfig.vmServiceUri, "http://127.0.0.1:8182");
+			assert.ok(promptForVmService.notCalled);
+		});
+
+		it("does not prompt for a VM service URI when an info file is provided", async () => {
+			const executeCommand = sb.stub(vs.commands, "executeCommand").callThrough();
+			const promptForVmService = executeCommand.withArgs("dart.promptForVmService").resolves("9999");
+			const vmServiceInfoFile = path.join(getRandomTempFolder(), "vm_service_info.json");
+
+			const resolvedConfig = await getAttachConfiguration({ vmServiceInfoFile });
+
+			assert.ok(resolvedConfig);
+			assert.equal(resolvedConfig.vmServiceInfoFile, vmServiceInfoFile);
+			assert.ok(promptForVmService.notCalled);
+		});
+
+		it("aborts resolving a launch configuration if the token is cancelled", async () => {
+			const cancellation = new vs.CancellationTokenSource();
+			defer("dispose cancellation source", () => cancellation.dispose());
+			cancellation.cancel();
+
+			const result = await privateApi.debugProvider.resolveDebugConfigurationWithSubstitutedVariables!(
+				vs.workspace.workspaceFolders![0],
+				{
+					name: "Dart",
+					program: fsPath(helloWorldMainFile),
+					request: "launch",
+					type: "dart",
+				},
+				cancellation.token,
+			);
+
+			assert.equal(result, undefined);
+		});
+
+		it("ignores Dart errors outside the working directory and in unrelated tests", async () => {
+			const dartError = new vs.Diagnostic(new vs.Range(0, 0, 0, 1), "Unrelated error", vs.DiagnosticSeverity.Error);
+			dartError.source = "dart";
+			const outsideProject = vs.Uri.file(path.join(getRandomTempFolder(), "outside.dart"));
+			sb.stub(vs.languages, "getDiagnostics").returns([
+				[outsideProject, [dartError]],
+				[helloWorldTestMainFile, [dartError]],
+			]);
+			const showErrorMessage = sb.stub(vs.window, "showErrorMessage");
+
+			const resolvedConfig = await getResolvedDebugConfiguration({
+				program: fsPath(helloWorldMainFile),
+			});
+
+			assert.ok(resolvedConfig);
+			assert.ok(showErrorMessage.notCalled);
+		});
+
+		it("ignores non-Dart errors and Dart warnings before launching", async () => {
+			const warning = new vs.Diagnostic(new vs.Range(0, 0, 0, 1), "Dart warning", vs.DiagnosticSeverity.Warning);
+			warning.source = "dart";
+			const otherError = new vs.Diagnostic(new vs.Range(0, 0, 0, 1), "Other extension error", vs.DiagnosticSeverity.Error);
+			otherError.source = "typescript";
+			sb.stub(vs.languages, "getDiagnostics").returns([[helloWorldMainFile, [warning, otherError]]]);
+			const showErrorMessage = sb.stub(vs.window, "showErrorMessage");
+
+			const resolvedConfig = await getResolvedDebugConfiguration({
+				program: fsPath(helloWorldMainFile),
+			});
+
+			assert.ok(resolvedConfig);
+			assert.ok(showErrorMessage.notCalled);
+		});
+
+		it("does not prompt for project errors when suppressPrompts is set", async () => {
+			const dartError = new vs.Diagnostic(new vs.Range(0, 0, 0, 1), "Dart error", vs.DiagnosticSeverity.Error);
+			dartError.source = "dart";
+			sb.stub(vs.languages, "getDiagnostics").returns([[helloWorldMainFile, [dartError]]]);
+			const showErrorMessage = sb.stub(vs.window, "showErrorMessage");
+
+			const resolvedConfig = await getResolvedDebugConfiguration({
+				program: fsPath(helloWorldMainFile),
+				suppressPrompts: true,
+			});
+
+			assert.ok(resolvedConfig);
+			assert.ok(showErrorMessage.notCalled);
+		});
+
 		it("respects explicitly set debuggerType", async () => {
 			const resolvedConfig = await getResolvedDebugConfiguration({
 				debuggerType: "dart",
