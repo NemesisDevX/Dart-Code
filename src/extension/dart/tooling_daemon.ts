@@ -48,6 +48,7 @@ export class VsCodeDartToolingDaemon extends DartToolingDaemon {
 		context.subscriptions.push(this);
 
 		this.editorServices = new EditorServices(this, deviceManager);
+		this.disposables.push(this.editorServices);
 
 		this.setUpStatusBarAndCommand(context);
 
@@ -275,13 +276,18 @@ export class VsCodeDartToolingDaemon extends DartToolingDaemon {
 	}
 
 	public dispose() {
+		if (this.sendActiveLocationDebounceTimer) {
+			clearTimeout(this.sendActiveLocationDebounceTimer);
+			this.sendActiveLocationDebounceTimer = undefined;
+		}
 		void commands.executeCommand("setContext", DTD_AVAILABLE, false);
 		super.dispose();
 	}
 }
 
-class EditorServices implements IAmDisposable {
+export class EditorServices implements IAmDisposable {
 	protected readonly disposables: IAmDisposable[] = [];
+	private isDisposed = false;
 
 	public activeLocation: ActiveLocation = {
 		textDocument: undefined,
@@ -294,32 +300,49 @@ class EditorServices implements IAmDisposable {
 	) { }
 
 	async register(): Promise<void> {
+		if (this.isDisposed)
+			return;
+
 		if (this.deviceManager) {
 			this.disposables.push(this.deviceManager.onDeviceAdded(async (device) => {
 				const supportedTypes = await this.deviceManager?.getSupportedPlatformsForWorkspace();
+				if (this.isDisposed)
+					return;
 				const isSupported = (d: Device) => this.deviceManager?.isSupported(supportedTypes, d) ?? true;
 				this.daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceAdded, device: this.asDtdEditorDevice(device, isSupported(device)) });
 			}, this));
 			this.disposables.push(this.deviceManager.onDeviceRemoved((deviceId) => {
+			if (this.isDisposed)
+				return;
 				this.daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceRemoved, deviceId });
 			}, this));
 			this.disposables.push(this.deviceManager.onDeviceChanged(async (device) => {
 				const supportedTypes = await this.deviceManager?.getSupportedPlatformsForWorkspace();
+				if (this.isDisposed)
+					return;
 				const isSupported = (d: Device) => this.deviceManager?.isSupported(supportedTypes, d) ?? true;
 				this.daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceChanged, device: this.asDtdEditorDevice(device, isSupported(device)) });
 			}, this));
 			this.disposables.push(this.deviceManager.onCurrentDeviceChanged((device) => {
+			if (this.isDisposed)
+				return;
 				this.daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceSelected, deviceId: device?.id });
 			}, this));
 		}
 
 		this.disposables.push(debugSessionStarted((session) => {
+			if (this.isDisposed)
+				return;
 			this.daemon.sendEvent(Stream.Editor, { kind: EventKind.debugSessionStarted, debugSession: this.asDtdEditorDebugSession(session) });
 		}, this));
 		this.disposables.push(debugSessionStopped((session) => {
+			if (this.isDisposed)
+				return;
 			this.daemon.sendEvent(Stream.Editor, { kind: EventKind.debugSessionStopped, debugSessionId: session.session.id });
 		}, this));
 		this.disposables.push(debugSessionChanged((session) => {
+			if (this.isDisposed)
+				return;
 			this.daemon.sendEvent(Stream.Editor, { kind: EventKind.debugSessionChanged, debugSession: this.asDtdEditorDebugSession(session) });
 		}, this));
 
@@ -392,6 +415,9 @@ class EditorServices implements IAmDisposable {
 	}
 
 	public dispose(): void {
+		if (this.isDisposed)
+			return;
+		this.isDisposed = true;
 		disposeAll(this.disposables);
 	}
 
