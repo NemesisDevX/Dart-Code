@@ -16,7 +16,7 @@ describe("EditorServices lifecycle", () => {
 		} = {};
 		let disposedDeviceSubscriptions = 0;
 		const subscription = (): IAmDisposable => ({
-			dispose: () => disposedDeviceSubscriptions++,
+			dispose: () => { disposedDeviceSubscriptions++; },
 		});
 
 		let resolvePlatforms!: (platforms: never[]) => void;
@@ -49,7 +49,7 @@ describe("EditorServices lifecycle", () => {
 		const sentEvents: EventKind[] = [];
 		let daemonDisposed = false;
 		const daemon = {
-			registerService: async () => { },
+			registerService: () => Promise.resolve(),
 			sendEvent: (stream: Stream, event: { kind: EventKind }) => {
 				assert.equal(stream, Stream.Editor);
 				if (daemonDisposed)
