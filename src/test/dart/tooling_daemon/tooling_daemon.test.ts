@@ -1,5 +1,7 @@
 import { strict as assert } from "assert";
+import * as net from "net";
 import * as vs from "vscode";
+import * as ws from "ws";
 import { isWin } from "../../../shared/constants";
 import { LogMessage } from "../../../shared/interfaces";
 import { DartToolingDaemon } from "../../../shared/services/tooling_daemon";
@@ -7,7 +9,7 @@ import { ActiveLocation, ActiveLocationChangedEvent, EventKind, ServiceMethod, S
 import { fsPath } from "../../../shared/utils/fs";
 import { waitFor } from "../../../shared/utils/promises";
 import { getActiveRealFileEditor } from "../../../shared/vscode/editors";
-import { activate, closeAllOpenFiles, defer, delay, flutterHelloWorldMainFile, helloWorldMainFile, openFile, privateApi, setConfigForTest, waitForResult } from "../../helpers";
+import { activate, closeAllOpenFiles, defer, delay, flutterHelloWorldMainFile, helloWorldMainFile, openFile, privateApi, sb, setConfigForTest, waitForResult } from "../../helpers";
 
 // These are basic tests for DTD. There are also some tests in `../dart_debug`.
 describe("dart tooling daemon", () => {
@@ -287,12 +289,16 @@ describe("dart tooling daemon", () => {
 		await assert.rejects(pending, /DTD connection is unavailable/);
 	});
 
-	it("rejects pending callMethod requests when the socket closes", async () => {
+	it("rejects pending callMethod requests when the socket closes unexpectedly", async () => {
 		const daemon = createDaemon(TestDartToolingDaemon);
 		await daemon.connected;
 
+		// Terminating the real socket in the same tick that sent the request
+		// guarantees it is still pending (no response could have arrived), and
+		// fires the real "close" event - the same path as an unexpected
+		// network disconnect.
 		const pending = daemon.callMethod(ServiceMethod.getIDEWorkspaceRoots);
-		daemon.simulateWebSocketClose();
+		daemon.terminateSocketForTest();
 		await assert.rejects(pending, /DTD connection is unavailable/);
 	});
 
@@ -300,7 +306,8 @@ describe("dart tooling daemon", () => {
 		const daemon = createDaemon(TestDartToolingDaemon);
 		await daemon.connected;
 
-		daemon.simulateWebSocketClose();
+		daemon.terminateSocketForTest();
+		await waitForResult(() => !daemon.hasConnection, "connection was not cleared after socket close");
 		// With the connection cleared, sends should fail with the expected
 		// "unavailable" error rather than a raw WebSocket "not open" error.
 		assert.throws(
@@ -310,27 +317,38 @@ describe("dart tooling daemon", () => {
 	});
 
 	it("does not send on a socket that is still connecting", async () => {
-		const daemon = createDaemon();
-		const errors: string[] = [];
-		let connected = false;
-		void daemon.connected.then(() => connected = true);
+		// A TCP server that accepts connections but never responds leaves the
+		// client WebSocket stuck in CONNECTING state, giving a deterministic
+		// window to test sends against a real non-OPEN socket.
+		const serverConnections = new Set<net.Socket>();
+		const server = net.createServer((conn) => {
+			serverConnections.add(conn);
+			conn.on("close", () => serverConnections.delete(conn));
+		}).listen(0, "127.0.0.1");
+		await new Promise<void>((resolve) => server.once("listening", resolve));
+		const socket = new ws.WebSocket(`ws://127.0.0.1:${(server.address() as net.AddressInfo).port}`, { followRedirects: false });
+		defer("Terminate socket and close server", () => {
+			socket.terminate();
+			for (const conn of serverConnections)
+				conn.destroy();
+			return new Promise<void>((resolve) => server.close(() => resolve()));
+		});
 
-		// Hammer sendEvent through the window where the socket exists but is not
-		// yet OPEN. Sends may fail, but only with the expected "unavailable"
-		// error and never a raw WebSocket "not open" error.
-		for (let i = 0; i < 5000 && !connected; i++) {
-			try {
-				daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceRemoved, deviceId: "fake" });
-			} catch (e) {
-				errors.push(String(e));
-			}
-			await delay(0);
-		}
+		const daemon = createDaemon(TestDartToolingDaemon);
 		await daemon.connected;
-		assert.ok(
-			errors.every((m) => !m.includes("not open") && !m.includes("readyState")),
-			`sendEvent hit a non-OPEN socket: ${errors.join(" | ")}`,
+		daemon.setConnectionForTest(socket);
+		assert.equal(socket.readyState, ws.WebSocket.CONNECTING);
+
+		const sendSpy = sb.spy(socket, "send");
+		assert.throws(
+			() => daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceRemoved, deviceId: "fake" }),
+			/DTD connection is unavailable/,
 		);
+		await assert.rejects(
+			daemon.callMethod(ServiceMethod.getIDEWorkspaceRoots),
+			/DTD connection is unavailable/,
+		);
+		assert.equal(sendSpy.callCount, 0, "a send reached the non-OPEN socket");
 	});
 
 	it("does not reject or log errors for fire-and-forget requests during shutdown", async () => {
@@ -354,6 +372,43 @@ describe("dart tooling daemon", () => {
 			`shutdown rejections produced error logging: ${logMessages.join(" | ")}`,
 		);
 	});
+
+	it("logs errors for fire-and-forget requests on unexpected disconnect", async () => {
+		const daemon = createDaemon(TestDartToolingDaemon);
+		await daemon.connected;
+
+		const logMessages: string[] = [];
+		const logListener = privateApi.logger.onLog((msg: LogMessage) => logMessages.push(msg.message));
+		defer("Dispose log listener", () => { logListener.dispose(); });
+
+		// Unlike during shutdown, a rejection caused by an unexpected disconnect
+		// should still be surfaced as an error log (but resolved rather than
+		// rethrown, because fire-and-forget callers have nobody to propagate to).
+		// Terminating in the same tick guarantees the request is still pending.
+		const pendingFolders = daemon.sendWorkspaceFoldersForTest([]);
+		daemon.terminateSocketForTest();
+		await waitForResult(() => !daemon.hasConnection, "connection was not cleared after socket close");
+		await pendingFolders;
+
+		await daemon.sendActiveLocationForTest({ textDocument: undefined, selections: [] });
+
+		assert.ok(
+			logMessages.some((m) => m.includes("Failed to send workspace folders")),
+			`unexpected disconnect was not logged: ${logMessages.join(" | ")}`,
+		);
+		assert.ok(
+			logMessages.some((m) => m.includes("Failed to send active location")),
+			`closed-socket send failure was not logged: ${logMessages.join(" | ")}`,
+		);
+	});
+
+	it("resolves connected when disposed before connecting", async () => {
+		const daemon = createDaemon();
+		daemon.dispose();
+		// `connected` must settle even if dispose runs before the socket opened,
+		// so continuations don't wait forever.
+		assert.equal(await daemon.connected, undefined);
+	});
 });
 
 function simplify(e: ActiveLocation) {
@@ -364,11 +419,26 @@ function simplify(e: ActiveLocation) {
 }
 
 class TestDartToolingDaemon extends DartToolingDaemon {
-	public simulateWebSocketClose(): void {
-		this.handleWebSocketClose();
+	public get hasConnection(): boolean {
+		return this.connection !== undefined;
+	}
+
+	public terminateSocketForTest(): void {
+		this.connection?.socket.terminate();
+	}
+
+	public setConnectionForTest(socket: ws.WebSocket): void {
+		// Swallow "error" events like the real error handler in connect() would,
+		// otherwise closing a CONNECTING socket produces an uncaught error event.
+		socket.on("error", () => { });
+		this.connection = { socket, dtdUri: "ws://127.0.0.1", dtdSecret: "" };
 	}
 
 	public sendWorkspaceFoldersForTest(workspaceFolderUris: string[]): Promise<void> {
 		return this.sendWorkspaceFolders(workspaceFolderUris);
+	}
+
+	public sendActiveLocationForTest(activeLocation: ActiveLocation): Promise<void> {
+		return this.sendActiveLocation(activeLocation);
 	}
 }

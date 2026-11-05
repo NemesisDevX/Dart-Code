@@ -18,7 +18,7 @@ export class DartToolingDaemon implements IAmDisposable {
 	protected readonly logger: CategoryLogger;
 
 	private readonly dtdProcess: DartToolingDaemonProcess;
-	private connection: ConnectionInfo | undefined;
+	protected connection: ConnectionInfo | undefined;
 	private nextId = 1;
 	private completers: Record<string, PromiseCompleter<DtdResult>> = {};
 	private serviceHandlers: Record<string, (params?: object) => PromiseOr<DtdResult>> = {};
@@ -99,15 +99,24 @@ export class DartToolingDaemon implements IAmDisposable {
 		} catch (e) {
 			// This is called fire-and-forget, so rejections during shutdown (when
 			// pending requests can never be answered) are expected and ignored.
+			// Other failures are logged rather than rethrown, because there is
+			// no caller to propagate them to.
 			if (!this.isShuttingDown)
-				throw e;
+				this.logger.error(`Failed to send workspace folders to DTD: ${String(e)}`);
 		}
 	}
 
 	protected async sendActiveLocation(activeLocation: ActiveLocation): Promise<void> {
-		const connection = await this.connected;
-		if (connection)
-			this.sendEvent(Stream.Editor, { kind: EventKind.activeLocationChanged, ...activeLocation });
+		try {
+			const connection = await this.connected;
+			if (connection)
+				this.sendEvent(Stream.Editor, { kind: EventKind.activeLocationChanged, ...activeLocation });
+		} catch (e) {
+			// This is called fire-and-forget, so rejections during shutdown (when
+			// pending requests can never be answered) are expected and ignored.
+			if (!this.isShuttingDown)
+				this.logger.error(`Failed to send active location to DTD: ${String(e)}`);
+		}
 	}
 
 	private async handleData(data: string) {
@@ -135,11 +144,16 @@ export class DartToolingDaemon implements IAmDisposable {
 				} catch (e: unknown) {
 					const error = this.asDtdError(e);
 					this.logger.error(`Failed handling service request ${method}: ${error.message}`);
-					this.send({
-						id,
-						jsonrpc: "2.0",
-						error,
-					});
+					try {
+						this.send({
+							id,
+							jsonrpc: "2.0",
+							error,
+						});
+					} catch {
+						// The connection dropped while the request was being
+						// handled, so the error response can't be sent either.
+					}
 				}
 			}
 
@@ -284,8 +298,11 @@ export class DartToolingDaemon implements IAmDisposable {
 	protected handleWebSocketClose() {
 		this.logger.info(`DTD WebSocket connection closed`);
 		// No more responses can arrive on this socket, so clear it and reject any
-		// pending requests rather than leaving their callers hanging.
+		// pending requests rather than leaving their callers hanging. Settling
+		// `connected` also unblocks callers that were still waiting for it (for
+		// example if the socket never reached the open state).
 		this.connection = undefined;
+		this.connectedCompleter.resolve(undefined);
 		this.rejectPendingRequests();
 		// Delay this for a few seconds so if the process terminates, we show that one instead (since it's the most
 		// significant).
@@ -336,6 +353,7 @@ export class DartToolingDaemon implements IAmDisposable {
 
 	public dispose(): void {
 		this.isShuttingDown = true;
+		this.connectedCompleter.resolve(undefined);
 		this.rejectPendingRequests();
 		try {
 			this.connection?.socket?.close();
