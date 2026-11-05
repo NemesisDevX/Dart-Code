@@ -24,7 +24,7 @@ export class DartToolingDaemon implements IAmDisposable {
 	private serviceHandlers: Record<string, (params?: object) => PromiseOr<DtdResult>> = {};
 
 	private hasShownTerminatedError = false;
-	private isShuttingDown = false;
+	protected isShuttingDown = false;
 
 	private connectedCompleter = new PromiseCompleter<ConnectionInfo | undefined>();
 	public get connected() { return this.connectedCompleter.promise; }
@@ -90,10 +90,17 @@ export class DartToolingDaemon implements IAmDisposable {
 	}
 
 	protected async sendWorkspaceFolders(workspaceFolderUris: string[]): Promise<void> {
-		const connection = await this.connected;
-		if (connection) {
-			const secret = connection.dtdSecret;
-			await this.callMethod(ServiceMethod.setIDEWorkspaceRoots, { secret, roots: workspaceFolderUris });
+		try {
+			const connection = await this.connected;
+			if (connection) {
+				const secret = connection.dtdSecret;
+				await this.callMethod(ServiceMethod.setIDEWorkspaceRoots, { secret, roots: workspaceFolderUris });
+			}
+		} catch (e) {
+			// This is called fire-and-forget, so rejections during shutdown (when
+			// pending requests can never be answered) are expected and ignored.
+			if (!this.isShuttingDown)
+				throw e;
 		}
 	}
 
@@ -205,12 +212,17 @@ export class DartToolingDaemon implements IAmDisposable {
 		const completer = new PromiseCompleter<DtdResult>();
 		this.completers[id] = completer;
 
-		this.send({
-			id,
-			jsonrpc: "2.0",
-			method,
-			params,
-		});
+		try {
+			this.send({
+				id,
+				jsonrpc: "2.0",
+				method,
+				params,
+			});
+		} catch (e) {
+			delete this.completers[id];
+			throw e;
+		}
 
 		return completer.promise;
 	}
@@ -252,7 +264,7 @@ export class DartToolingDaemon implements IAmDisposable {
 	}
 
 	private send(json: DtdMessage): void {
-		if (!this.connection)
+		if (this.connection?.socket.readyState !== ws.WebSocket.OPEN)
 			throw new Error("Unable to send message, DTD connection is unavailable");
 
 		const str = JSON.stringify(json);
@@ -271,6 +283,10 @@ export class DartToolingDaemon implements IAmDisposable {
 
 	protected handleWebSocketClose() {
 		this.logger.info(`DTD WebSocket connection closed`);
+		// No more responses can arrive on this socket, so clear it and reject any
+		// pending requests rather than leaving their callers hanging.
+		this.connection = undefined;
+		this.rejectPendingRequests();
 		// Delay this for a few seconds so if the process terminates, we show that one instead (since it's the most
 		// significant).
 		setTimeout(() => {
@@ -312,8 +328,15 @@ export class DartToolingDaemon implements IAmDisposable {
 		});
 	}
 
+	private rejectPendingRequests() {
+		for (const completer of Object.values(this.completers))
+			completer.reject(new Error("Unable to send message, DTD connection is unavailable"));
+		this.completers = {};
+	}
+
 	public dispose(): void {
 		this.isShuttingDown = true;
+		this.rejectPendingRequests();
 		try {
 			this.connection?.socket?.close();
 			this.connection = undefined;

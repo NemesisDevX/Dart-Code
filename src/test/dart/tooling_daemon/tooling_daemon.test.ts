@@ -1,11 +1,13 @@
 import { strict as assert } from "assert";
 import * as vs from "vscode";
 import { isWin } from "../../../shared/constants";
+import { LogMessage } from "../../../shared/interfaces";
+import { DartToolingDaemon } from "../../../shared/services/tooling_daemon";
 import { ActiveLocation, ActiveLocationChangedEvent, EventKind, ServiceMethod, Stream } from "../../../shared/services/tooling_daemon_services";
 import { fsPath } from "../../../shared/utils/fs";
 import { waitFor } from "../../../shared/utils/promises";
 import { getActiveRealFileEditor } from "../../../shared/vscode/editors";
-import { activate, closeAllOpenFiles, delay, flutterHelloWorldMainFile, helloWorldMainFile, openFile, privateApi, setConfigForTest, waitForResult } from "../../helpers";
+import { activate, closeAllOpenFiles, defer, delay, flutterHelloWorldMainFile, helloWorldMainFile, openFile, privateApi, setConfigForTest, waitForResult } from "../../helpers";
 
 // These are basic tests for DTD. There are also some tests in `../dart_debug`.
 describe("dart tooling daemon", () => {
@@ -255,6 +257,103 @@ describe("dart tooling daemon", () => {
 			},
 		);
 	});
+
+	// Creates a locally constructed daemon connected to its own DTD process so
+	// tests can exercise disconnect/dispose behaviour without affecting the
+	// extension's own daemon (privateApi.toolingDaemon).
+	function createDaemon<T extends typeof DartToolingDaemon>(daemonClass?: T): InstanceType<T> {
+		const daemon = new (daemonClass ?? DartToolingDaemon)(
+			privateApi.logger,
+			privateApi.workspaceContext.sdks,
+			privateApi.dartCapabilities,
+			undefined,
+			[],
+			1000,
+			() => ({}),
+			async () => { },
+		);
+		defer("Dispose daemon", () => daemon.dispose());
+		return daemon as InstanceType<T>;
+	}
+
+	it("rejects pending callMethod requests when disposed", async () => {
+		const daemon = createDaemon();
+		await daemon.connected;
+
+		// The request cannot be answered once the daemon is disposed, so the
+		// promise should reject rather than remain pending forever.
+		const pending = daemon.callMethod(ServiceMethod.getIDEWorkspaceRoots);
+		daemon.dispose();
+		await assert.rejects(pending, /DTD connection is unavailable/);
+	});
+
+	it("rejects pending callMethod requests when the socket closes", async () => {
+		const daemon = createDaemon(TestDartToolingDaemon);
+		await daemon.connected;
+
+		const pending = daemon.callMethod(ServiceMethod.getIDEWorkspaceRoots);
+		daemon.simulateWebSocketClose();
+		await assert.rejects(pending, /DTD connection is unavailable/);
+	});
+
+	it("reports events sent on a closed socket as a clean unavailable error", async () => {
+		const daemon = createDaemon(TestDartToolingDaemon);
+		await daemon.connected;
+
+		daemon.simulateWebSocketClose();
+		// With the connection cleared, sends should fail with the expected
+		// "unavailable" error rather than a raw WebSocket "not open" error.
+		assert.throws(
+			() => daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceRemoved, deviceId: "fake" }),
+			/DTD connection is unavailable/,
+		);
+	});
+
+	it("does not send on a socket that is still connecting", async () => {
+		const daemon = createDaemon();
+		const errors: string[] = [];
+		let connected = false;
+		void daemon.connected.then(() => connected = true);
+
+		// Hammer sendEvent through the window where the socket exists but is not
+		// yet OPEN. Sends may fail, but only with the expected "unavailable"
+		// error and never a raw WebSocket "not open" error.
+		for (let i = 0; i < 5000 && !connected; i++) {
+			try {
+				daemon.sendEvent(Stream.Editor, { kind: EventKind.deviceRemoved, deviceId: "fake" });
+			} catch (e) {
+				errors.push(String(e));
+			}
+			await delay(0);
+		}
+		await daemon.connected;
+		assert.ok(
+			errors.every((m) => !m.includes("not open") && !m.includes("readyState")),
+			`sendEvent hit a non-OPEN socket: ${errors.join(" | ")}`,
+		);
+	});
+
+	it("does not reject or log errors for fire-and-forget requests during shutdown", async () => {
+		const daemon = createDaemon(TestDartToolingDaemon);
+		await daemon.connected;
+
+		const logMessages: string[] = [];
+		const logListener = privateApi.logger.onLog((msg: LogMessage) => logMessages.push(msg.message));
+		defer("Dispose log listener", () => { logListener.dispose(); });
+
+		// sendWorkspaceFolders() is called fire-and-forget from real code paths,
+		// so its callMethod rejection during dispose should be swallowed rather
+		// than rejected or logged.
+		const pending = daemon.sendWorkspaceFoldersForTest([]);
+		daemon.dispose();
+		await pending;
+
+		await delay(1);
+		assert.ok(
+			!logMessages.some((m) => m.includes("DTD connection is unavailable")),
+			`shutdown rejections produced error logging: ${logMessages.join(" | ")}`,
+		);
+	});
 });
 
 function simplify(e: ActiveLocation) {
@@ -262,4 +361,14 @@ function simplify(e: ActiveLocation) {
 		filePath: fsPath(vs.Uri.parse(e.textDocument!.uri)),
 		selections: e.selections
 	};
+}
+
+class TestDartToolingDaemon extends DartToolingDaemon {
+	public simulateWebSocketClose(): void {
+		this.handleWebSocketClose();
+	}
+
+	public sendWorkspaceFoldersForTest(workspaceFolderUris: string[]): Promise<void> {
+		return this.sendWorkspaceFolders(workspaceFolderUris);
+	}
 }
