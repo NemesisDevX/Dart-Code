@@ -39,13 +39,13 @@ describe("dart tests", () => {
 
 		const staticGroup = model.groupDiscovered(session, suitePath, source.Outline, 1, "auth", undefined, suitePath, undefined);
 		const dynamicGroup = model.groupDiscovered(session, suitePath, source.Outline, 2, "group $name suffix", undefined, suitePath, undefined);
-		const dynamicTestWithGroupName = model.testDiscovered(session, suitePath, source.Outline, 1, "test $name", undefined, suitePath, undefined, undefined);
+		const dynamicTestWithGroupName = model.testDiscovered(session, suitePath, source.Outline, 1, "cross $name", undefined, suitePath, undefined, undefined);
 		const dynamicTest = model.testDiscovered(session, suitePath, source.Outline, 2, "test $name suffix", undefined, suitePath, undefined, undefined);
 
 		const prefixMatch = model.groupDiscovered(session, suitePath, source.Result, 11, "auth_service", undefined, suitePath, undefined);
 		const partialDynamicGroupMatch = model.groupDiscovered(session, suitePath, source.Result, 12, "group alpha suffix extra", undefined, suitePath, undefined);
 		const matchingDynamicGroup = model.groupDiscovered(session, suitePath, source.Result, 13, "group alpha suffix", undefined, suitePath, undefined);
-		const wrongKindForGroup = model.groupDiscovered(session, suitePath, source.Result, 14, "test alpha", undefined, suitePath, undefined);
+		const wrongKindForGroup = model.groupDiscovered(session, suitePath, source.Result, 14, "cross alpha", undefined, suitePath, undefined);
 		const matchingDynamicTest = model.testDiscovered(session, suitePath, source.Result, 11, "test alpha suffix", undefined, suitePath, undefined, undefined);
 		const wrongKindForTest = model.testDiscovered(session, suitePath, source.Result, 12, "group alpha suffix", undefined, suitePath, undefined, undefined);
 		model.groupDiscovered(session, suitePath, source.Result, 15, "result $name", undefined, suitePath, undefined);
