@@ -475,7 +475,7 @@ export class TestModel {
 		 * the analyzer.
 		 */
 		if (groupName && source === TestSource.Result)
-			parent = this.findMatchingDynamicNode(parent, groupName) ?? parent;
+			parent = this.findMatchingDynamicNode(parent, groupName, true) ?? parent;
 
 		const groupNode = existingGroup ?? new GroupNode(suite, parent, groupName, groupPath, range);
 
@@ -517,14 +517,14 @@ export class TestModel {
 		const suite = this.suites.getForPath(suitePath)!;
 		const existingTest = suite.reuseMatchingTest(testName);
 		const oldParent = existingTest?.parent;
-		let parent = groupID ? suite.getMyGroup(dartCodeDebugSessionID, groupID)! : suite.node;
+		let parent: TreeNode = groupID ? suite.getMyGroup(dartCodeDebugSessionID, groupID)! : suite.node;
 
 		/**
 		 * If we're a dynamic test/group, we should be re-parented under the dynamic node that came from
 		 * the analyzer.
 		 */
 		if (testName && source === TestSource.Result)
-			parent = this.findMatchingDynamicNode(parent, testName) ?? parent;
+			parent = this.findMatchingDynamicNode(parent, testName, false) ?? parent;
 
 		const testNode = existingTest ?? new TestNode(suite, parent, testName, testPath, range);
 
@@ -588,17 +588,25 @@ export class TestModel {
 	 * Find a matching node in 'parent' that might be a node for a dynamic test/group that name is
 	 * an instance of.
 	 */
-	private findMatchingDynamicNode<T extends GroupNode | SuiteNode>(parent: T, name: string): T | undefined {
+	private findMatchingDynamicNode(parent: TreeNode, name: string, isGroup: true): GroupNode | undefined;
+	private findMatchingDynamicNode(parent: TreeNode, name: string, isGroup: false): TestNode | undefined;
+	private findMatchingDynamicNode(parent: TreeNode, name: string, isGroup: boolean): GroupNode | TestNode | undefined {
 		// If the parent has any children exactly named us, they should be used regardless.
-		if (parent.children.find((c) => c.name === name))
+		if (parent.children.find((c) => (c instanceof GroupNode || c instanceof TestNode) && c.name === name))
 			return;
 
 		for (const child of parent.children) {
-			if (!child.name || typeof child !== typeof parent)
+			const candidate = child as GroupNode | TestNode;
+			if (isGroup && !(candidate instanceof GroupNode))
 				continue;
-			const regex = new RegExp(makeRegexForTests([{ name: child.name, isGroup: child instanceof GroupNode, position: undefined }]));
+			if (!isGroup && !(candidate instanceof TestNode))
+				continue;
+			if (candidate.testSource !== TestSource.Outline
+				|| !candidate.name?.includes("$"))
+				continue;
+			const regex = new RegExp(makeRegexForTests([{ name: candidate.name, isGroup: false, position: undefined }]));
 			if (regex.test(name))
-				return child as unknown as T;
+				return candidate;
 		}
 	}
 

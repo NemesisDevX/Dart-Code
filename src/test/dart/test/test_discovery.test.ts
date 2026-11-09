@@ -2,6 +2,7 @@ import { strict as assert } from "assert";
 import * as fs from "fs";
 import * as path from "path";
 import * as vs from "vscode";
+import { TestSource } from "../../../shared/test/test_model";
 import { fsPath } from "../../../shared/utils/fs";
 import { waitFor } from "../../../shared/utils/promises";
 import { captureTestDebugConfigurations } from "../../debug_helpers";
@@ -27,6 +28,38 @@ describe("dart tests", () => {
 		assert.ok(expectedResults);
 		assert.ok(actualResults);
 		checkTreeNodeResults(actualResults, expectedResults);
+	});
+
+	it("matches runtime nodes only to dynamic Outline nodes of the same kind and full name", () => {
+		const model = privateApi.testModel;
+		const suitePath = fsPath(helloWorldTestDiscoveryFile);
+		const session = "dynamic_node_matching";
+		const suite = model.suiteDiscovered(session, suitePath);
+		const source = TestSource;
+
+		const staticGroup = model.groupDiscovered(session, suitePath, source.Outline, 1, "auth", undefined, suitePath, undefined);
+		const dynamicGroup = model.groupDiscovered(session, suitePath, source.Outline, 2, "group $name suffix", undefined, suitePath, undefined);
+		const dynamicTestWithGroupName = model.testDiscovered(session, suitePath, source.Outline, 1, "test $name", undefined, suitePath, undefined, undefined);
+		const dynamicTest = model.testDiscovered(session, suitePath, source.Outline, 2, "test $name suffix", undefined, suitePath, undefined, undefined);
+
+		const prefixMatch = model.groupDiscovered(session, suitePath, source.Result, 11, "auth_service", undefined, suitePath, undefined);
+		const partialDynamicGroupMatch = model.groupDiscovered(session, suitePath, source.Result, 12, "group alpha suffix extra", undefined, suitePath, undefined);
+		const matchingDynamicGroup = model.groupDiscovered(session, suitePath, source.Result, 13, "group alpha suffix", undefined, suitePath, undefined);
+		const wrongKindForGroup = model.groupDiscovered(session, suitePath, source.Result, 14, "test alpha", undefined, suitePath, undefined);
+		const matchingDynamicTest = model.testDiscovered(session, suitePath, source.Result, 11, "test alpha suffix", undefined, suitePath, undefined, undefined);
+		const wrongKindForTest = model.testDiscovered(session, suitePath, source.Result, 12, "group alpha suffix", undefined, suitePath, undefined, undefined);
+		model.groupDiscovered(session, suitePath, source.Result, 15, "result $name", undefined, suitePath, undefined);
+		const resultNodeShouldNotMatch = model.groupDiscovered(session, suitePath, source.Result, 16, "result actual", undefined, suitePath, undefined);
+
+		assert.equal(prefixMatch.parent, suite.node, "static group prefixes should not capture runtime groups");
+		assert.equal(partialDynamicGroupMatch.parent, suite.node, "dynamic group patterns should match the full name");
+		assert.equal(matchingDynamicGroup.parent, dynamicGroup);
+		assert.equal(wrongKindForGroup.parent, suite.node, "a dynamic TestNode must not capture a runtime GroupNode");
+		assert.equal(matchingDynamicTest.parent, dynamicTest);
+		assert.equal(wrongKindForTest.parent, suite.node, "a dynamic GroupNode must not capture a runtime TestNode");
+		assert.equal(resultNodeShouldNotMatch.parent, suite.node, "Result nodes must not be used as dynamic patterns");
+		assert.equal(staticGroup.parent, suite.node);
+		assert.equal(dynamicTestWithGroupName.parent, suite.node);
 	});
 
 	it("handles renaming of discovered tests", async () => {
