@@ -175,6 +175,17 @@ export class ChildProcessSpawnStub {
 		return new ChildProcessSpawnStub((bin, args) => ChildProcessSpawnStub.isExecutable(bin, executableNames.flutter) && ChildProcessSpawnStub.includesArg(args, "pub"), options);
 	}
 
+	static flutterConfigAndEditorSpawns(options?: { configResult?: FakeSpawnResult }) {
+		return new ChildProcessSpawnStub((bin, args) => {
+			if (ChildProcessSpawnStub.isExecutable(bin, executableNames.flutter) && ChildProcessSpawnStub.includesArg(args, "config"))
+				return options?.configResult ?? { stdout: "{}" };
+			const fileName = path.basename(ChildProcessSpawnStub.unquote(bin));
+			if (fileName === "open" || fileName === "studio" || fileName === "studio.sh" || fileName === "studio64.exe")
+				return {};
+			return undefined;
+		});
+	}
+
 	static dartOrFlutterPub(options?: { stdout?: string, exitCode?: number }) {
 		return new ChildProcessSpawnStub((bin, args) => (ChildProcessSpawnStub.isExecutable(bin, executableNames.dart) || ChildProcessSpawnStub.isExecutable(bin, executableNames.flutter)) && ChildProcessSpawnStub.includesArg(args, "pub"), options);
 	}
