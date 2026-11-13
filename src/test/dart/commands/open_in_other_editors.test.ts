@@ -89,7 +89,7 @@ describe("OpenInOtherEditorCommands", () => {
 			ChildProcessSpawnStub.flutterConfigAndEditorSpawns();
 
 			await assert.rejects(
-				vs.commands.executeCommand("flutter.openInAndroidStudio", vs.Uri.file(folder)),
+				Promise.resolve(vs.commands.executeCommand("flutter.openInAndroidStudio", vs.Uri.file(folder))),
 				/Cannot find Android Studio without a Flutter SDK/,
 			);
 		});
@@ -144,7 +144,7 @@ describe("OpenInOtherEditorCommands", () => {
 			});
 
 			await assert.rejects(
-				vs.commands.executeCommand("flutter.openInAndroidStudio", vs.Uri.file(folder)),
+				Promise.resolve(vs.commands.executeCommand("flutter.openInAndroidStudio", vs.Uri.file(folder))),
 				/Failed to run "flutter config --machine"/,
 			);
 		});
